@@ -1,44 +1,101 @@
 import { Bee, Utils } from '@ethersphere/bee-js'
-import { HexString } from '@ethersphere/bee-js/dist/types/utils/hex'
-import { keccak256Hash } from 'mantaray-js/dist/utils'
-import { useState } from 'react'
+import { hexToBytes } from '@ethersphere/bee-js/dist/types/utils/hex'
+import Wallet from 'ethereumjs-wallet'
+import { FormEvent, FormEventHandler, ReactElement, useState } from 'react'
 import { useEffect } from 'react'
-import Comment from './Comment'
+import ContentView from './ContentView'
 import PublicPirateDb from './services/PublicPirateDb'
+import UserComment from './services/UserComment'
 import { VERSION_HASH } from './Utility'
 
+const DEFAULT_CHILDREN_COUNT = 5
+
 interface Props {
-  contentHash: HexString // -> PublicPirateDb get users
+  contentHash: string // -> PublicPirateDb get users + content fetch
+  level: number
+  orderNo: number
+  loadingThreadId: [number, number]
   bee: Bee
-  userPublicKey?: Uint8Array
+  initChildrenDoneFn: (level: number, orderNo: number) => void
+  initDoneFn: (level: number, ordnerNo: number) => void
+  /** For writing direct comments */
+  wallet: Wallet
 }
 
-export default function Thread({ contentHash, bee, userPublicKey }: Props) {
-  const [comment, setComment] = useState('')
-  const publicPirateDb = new PublicPirateDb(bee, Utils.hexToBytes<32>(contentHash), VERSION_HASH)
+export default function Thread({
+  contentHash,
+  level,
+  orderNo,
+  loadingThreadId,
+  bee,
+  initChildrenDoneFn,
+  initDoneFn,
+  wallet,
+}: Props) {
+  const publicPirateDb = new PublicPirateDb(bee, Utils.hexToBytes(contentHash), VERSION_HASH)
+  const [childrenElements, setChildrenElements] = useState<ReactElement[]>([])
+  const [commentText, setCommentText] = useState('')
 
-  const initComment = () => {
-    if (!userPublicKey) {
+  useEffect(() => {
+    initDoneFn(level, orderNo)
+  })
+
+  useEffect(() => {
+    if (loadingThreadId[0] === level && loadingThreadId[1] === orderNo) {
+      // init Children Thread elements
+      initChildren()
+    }
+    // if -1, -1, then set loading more and comment section
+  }, [loadingThreadId])
+
+  const initChildren = async () => {
+    const record = await publicPirateDb.getLatestRecord()
+
+    if (!record) {
+      initChildrenDoneFn(level, orderNo) //children has
+
       return
     }
-    const getTopic = (): HexString => {
-      const bytes = keccak256Hash(new Uint8Array([...Utils.hexToBytes<32>(contentHash), ...userPublicKey]))
-
-      return Utils.bytesToHex(bytes, 64)
+    const ethAddresses = record.ethAddresses.map(e => hexToBytes(e)).reverse() // most recent comment is the first index
+    const userComment = new UserComment(bee, contentHash)
+    for (const [index, ethAddress] of Object.entries(ethAddresses)) {
+      const contentHash = await userComment.fetchCommentReference(Utils.makeEthAddress(ethAddress))
+      setChildrenElements([
+        ...childrenElements,
+        <Thread
+          contentHash={contentHash}
+          level={level + 1}
+          orderNo={Number(index)}
+          bee={bee}
+          initChildrenDoneFn={initChildrenDoneFn}
+          loadingThreadId={loadingThreadId}
+          initDoneFn={initDoneFn}
+          wallet={wallet}
+        />,
+      ])
     }
-    // const comment
+    initChildrenDoneFn(level, orderNo)
   }
 
-  //async init
-  useEffect(() => {
-    // get print message
-    initComment()
-    // init Children Thread elements
-  }, [])
+  const handleSendComment = async (e: FormEvent) => {
+    e.preventDefault()
+    const userComment = new UserComment(bee, contentHash)
+    await userComment.writeComment(commentText, wallet)
+    await publicPirateDb.broadcastEthAddresses([Utils.makeEthAddress(wallet.getAddressString().slice(2))])
+  }
 
   return (
     <div>
-      <Comment comment={comment} />
+      <ContentView contentHash={contentHash} />
+      {childrenElements.forEach(e => {
+        return e
+      })}
+      <div className="write-comment">
+        <form onSubmit={handleSendComment}>
+          <input type="text" value={commentText} onChange={e => setCommentText(e.target.value)} />
+          <input type="submit" value="Submit" />
+        </form>
+      </div>
     </div>
   )
 }
